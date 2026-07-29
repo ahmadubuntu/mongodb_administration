@@ -644,7 +644,7 @@ check_mongo_query_latency() {
       # This is peer RTT inside the cluster, not pure on-box — use checker thresholds
       if (( remote_ms >= ${QUERY_FAIL_MS:-500} )); then
         record_check "latency" "from-member" "FAIL" "${remote_ms}ms ${alt}→${primary_target}"
-      elif (( remote_ms >= ${QUERY_WARN_MS:-50} )); then
+      elif (( remote_ms >= ${QUERY_WARN_MS:-100} )); then
         record_check "latency" "from-member" "WARN" "${remote_ms}ms ${alt}→${primary_target}"
       else
         record_check "latency" "from-member" "PASS" "${remote_ms}ms ${alt}→${primary_target}"
