@@ -1,0 +1,12 @@
+# Nested realtime_check gitignore is authoritative for that tree; root mirrors it.
+mongodb_realtime_check/config/clusters/*.env
+!mongodb_realtime_check/config/clusters/*.example.env
+mongodb_realtime_check/reports/
+mongodb_realtime_check/env.sh
+*.prom
+__pycache__/
+*.pyc
+.DS_Store
+.env
+*.pem
+*.key
