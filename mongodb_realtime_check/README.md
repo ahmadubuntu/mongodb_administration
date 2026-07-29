@@ -17,7 +17,11 @@ cp config/clusters/stgmongo.example.env config/clusters/stgmongo.env   # STG
 ```
 
 Verified defaults for gen clusters: `SSH_PORT=7412`, `MONGO_PORT=5061`, `REPLICA_SET_NAME=rs0`.
-VIP/LB are empty by default (not checked). `hello`/`ping` work without auth; set `MONGO_URI` for `rs.status` / oplog / WiredTiger.
+VIP/LB are empty by default (not checked).
+
+**Auth:** the checker loads `db.auth(user, pass)` from `~/.mongorc.js` or `~/.mongoshrc.js`
+when `host.includes(...)` matches an inventory host (passwords are never logged).
+Override with `MONGO_URI` / `MONGO_USER`+`MONGO_PASSWORD` in the gitignored `.env` if needed.
 
 Options: `-v` verbose, `--json`, `-n` no sudo, `-o report.log`,
 `--only TASKS`, `--skip TASKS`, `--ask-tasks`, `--list-tasks`.
@@ -49,7 +53,7 @@ Reports: `reports/mongoaha-<slug>-<timestamp>.log`.
 ## Credentials
 
 - SSH user once (`-u` or prompt); sudo password once if needed (`SUDO_PASSWORD` env or prompt).
-- Mongo: prefer `MONGO_URI` in the gitignored `.env`, or `MONGO_USER` / `MONGO_PASSWORD`.
+- Mongo: parse `~/.mongorc.js` / `~/.mongoshrc.js` (`host.includes` → `db.auth`), else `MONGO_URI` / `MONGO_USER` in gitignored `.env`.
 - Missing mongosh on the checker → WARN + SSH fallback to a member; missing auth → WARN.
 
 ## Inventory

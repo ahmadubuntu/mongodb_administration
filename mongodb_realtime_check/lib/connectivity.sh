@@ -26,12 +26,29 @@ _mongo_uri_for_target() {
     echo "$MONGO_URI"
     return
   fi
+  # Lazy-load from ~/.mongorc.js for this target when needed
+  if [[ -z "$user" || -z "$pass" ]]; then
+    local f
+    for f in "${MONGO_RC_FILE:-}" "${HOME}/.mongorc.js" "${HOME}/.mongoshrc.js"; do
+      [[ -n "$f" && -f "$f" ]] || continue
+      if declare -F _mongo_creds_from_rc_file >/dev/null 2>&1 && _mongo_creds_from_rc_file "$target" "$f"; then
+        user="$MONGO_USER"
+        pass="$MONGO_PASSWORD"
+        break
+      fi
+    done
+  fi
   local auth="" q="directConnection=true"
   if [[ -n "$user" ]]; then
-    auth="${user}"
-    [[ -n "$pass" ]] && auth+=":${pass}"
-    auth+="@"
-    q="authSource=${authdb}"
+    local eu ep
+    if declare -F _mongo_uri_escape >/dev/null 2>&1; then
+      eu="$(_mongo_uri_escape "$user")"
+      ep="$(_mongo_uri_escape "$pass")"
+    else
+      eu="$user"; ep="$pass"
+    fi
+    auth="${eu}:${ep}@"
+    q="authSource=${authdb}&directConnection=true"
   fi
   [[ -n "$opts" ]] && q="${q}&${opts}"
   echo "mongodb://${auth}${host}:${port}/?${q}"

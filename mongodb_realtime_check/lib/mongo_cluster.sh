@@ -8,6 +8,124 @@ _mongo_bin_local() {
   return 1
 }
 
+_mongo_uri_escape() {
+  # Percent-encode for mongodb:// userinfo (python preferred)
+  local s="$1"
+  if have_cmd python3; then
+    MONGO_ESC_IN="$s" python3 -c 'import os,urllib.parse; print(urllib.parse.quote(os.environ["MONGO_ESC_IN"], safe=""))'
+  else
+    printf '%s' "$s" | sed 's/%/%25/g; s/@/%40/g; s/:/%3A/g; s/\//%2F/g; s/#/%23/g; s/?/%3F/g'
+  fi
+}
+
+# Parse ~/.mongorc.js (and ~/.mongoshrc.js) for db.auth matching a host/target.
+# Sets MONGO_USER / MONGO_PASSWORD when found. Never prints the password.
+_mongo_creds_from_rc_file() {
+  local target="$1" rcfile="$2"
+  [[ -f "$rcfile" && -n "$target" ]] || return 1
+  have_cmd python3 || return 1
+  local pair
+  pair="$(TARGET="$target" RCFILE="$rcfile" python3 - <<'PY'
+import os, re, sys
+target = os.environ["TARGET"].strip()
+path = os.environ["RCFILE"]
+try:
+    text = open(path, encoding="utf-8").read()
+except OSError:
+    sys.exit(1)
+tip = target.split(":", 1)[0]
+
+def host_matches(needle: str) -> bool:
+    parts = [p.strip() for p in needle.split(",") if p.strip()]
+    if target in needle or tip in needle:
+        return True
+    for p in parts:
+        pip = p.split(":", 1)[0]
+        if target == p or tip == pip or tip in p or p in target:
+            return True
+    return False
+
+# Split into if / else-if chunks so multi-includes STG blocks work
+chunks = re.split(r"\belse\s+if\b|\bif\b", text)
+auth_re = re.compile(
+    r"db\.auth\(\s*(['\"])(.*?)\1\s*,\s*(['\"])(.*?)\3\s*\)", re.S
+)
+inc_re = re.compile(r"host\.includes\(\s*(['\"])(.*?)\1\s*\)", re.S)
+
+for chunk in chunks:
+    includes = [m.group(2) for m in inc_re.finditer(chunk)]
+    if not includes:
+        continue
+    if not any(host_matches(n) for n in includes):
+        continue
+    am = auth_re.search(chunk)
+    if not am:
+        continue
+    user, pw = am.group(2), am.group(4)
+    sys.stdout.write(user + "\t" + pw)
+    sys.exit(0)
+sys.exit(1)
+PY
+)" || return 1
+  [[ -n "$pair" ]] || return 1
+  MONGO_USER="${pair%%$'\t'*}"
+  MONGO_PASSWORD="${pair#*$'\t'}"
+  [[ -n "$MONGO_USER" && -n "$MONGO_PASSWORD" ]] || return 1
+  return 0
+}
+
+mongo_resolve_credentials() {
+  # Prefer explicit inventory / env; else load from ~/.mongorc.js for inventory hosts.
+  if [[ -n "${MONGO_URI:-}" ]]; then
+    emit "  ${C_DIM}Mongo auth: MONGO_URI from inventory/env${C_RESET}"
+    return 0
+  fi
+  if [[ -n "${MONGO_USER:-}" && -n "${MONGO_PASSWORD:-}" ]]; then
+    emit "  ${C_DIM}Mongo auth: MONGO_USER from inventory/env${C_RESET}"
+    return 0
+  fi
+
+  local targets=() h port="${MONGO_PORT:-27017}" arr=()
+  csv_to_array arr "${MONGOD_HOSTS:-${MONGO_HOSTS:-}}"
+  for h in "${arr[@]}"; do
+    [[ -z "$h" ]] && continue
+    if [[ "$h" == *:* ]]; then targets+=("$h"); else targets+=("${h}:${port}"); fi
+  done
+  csv_to_array arr "${MONGOS_HOSTS:-}"
+  for h in "${arr[@]}"; do
+    [[ -z "$h" ]] && continue
+    if [[ "$h" == *:* ]]; then targets+=("$h"); else targets+=("${h}:${port}"); fi
+  done
+  if [[ ${#targets[@]} -eq 0 && -n "${MONGO_CONNECT_TARGET:-}" ]]; then
+    targets+=("${MONGO_CONNECT_TARGET}")
+  fi
+
+  local rc_files=()
+  [[ -n "${MONGO_RC_FILE:-}" ]] && rc_files+=("${MONGO_RC_FILE}")
+  rc_files+=("${HOME}/.mongorc.js" "${HOME}/.mongoshrc.js")
+
+  local t f src=""
+  for t in "${targets[@]}"; do
+    for f in "${rc_files[@]}"; do
+      [[ -f "$f" ]] || continue
+      if _mongo_creds_from_rc_file "$t" "$f"; then
+        src="$f"
+        break 2
+      fi
+    done
+  done
+
+  if [[ -n "$src" ]]; then
+    export MONGO_USER MONGO_PASSWORD
+    export MONGO_AUTH_DB="${MONGO_AUTH_DB:-admin}"
+    emit "  ${C_DIM}Mongo auth: loaded from ${src} (user/password not logged)${C_RESET}"
+    return 0
+  fi
+
+  emit "  ${C_DIM}Mongo auth: no match in ~/.mongorc.js — hello/ping only; set MONGO_URI or fix host.includes() patterns${C_RESET}"
+  return 0
+}
+
 _mongo_build_uri() {
   if [[ -n "${MONGO_URI:-}" ]]; then
     echo "$MONGO_URI"
@@ -20,15 +138,24 @@ _mongo_build_uri() {
     [[ -n "$h" ]] && target="${h}:${MONGO_PORT:-27017}"
   fi
   [[ -n "$target" ]] || { echo ""; return 1; }
+  # Refresh creds for this specific target when user/pass still empty
+  if [[ -z "${MONGO_USER:-}" || -z "${MONGO_PASSWORD:-}" ]]; then
+    local f
+    for f in "${MONGO_RC_FILE:-}" "${HOME}/.mongorc.js" "${HOME}/.mongoshrc.js"; do
+      [[ -n "$f" && -f "$f" ]] || continue
+      _mongo_creds_from_rc_file "$target" "$f" && break
+    done
+  fi
   local host="${target%%:*}" port="${target##*:}"
   local user="${MONGO_USER:-}" pass="${MONGO_PASSWORD:-}" authdb="${MONGO_AUTH_DB:-admin}"
   local opts="${MONGO_URI_OPTS:-}" rs="${REPLICA_SET_NAME:-}"
   local auth="" q="directConnection=true"
   if [[ -n "$user" ]]; then
-    auth="${user}"
-    [[ -n "$pass" ]] && auth+=":${pass}"
-    auth+="@"
-    q="authSource=${authdb}"
+    local eu ep
+    eu="$(_mongo_uri_escape "$user")"
+    ep="$(_mongo_uri_escape "$pass")"
+    auth="${eu}:${ep}@"
+    q="authSource=${authdb}&directConnection=true"
     [[ -n "$rs" ]] && q+="&replicaSet=${rs}"
   elif [[ -n "$rs" ]]; then
     q="replicaSet=${rs}&directConnection=true"
@@ -65,10 +192,11 @@ _mongo_eval_on_host() {
   else
     local auth="" q="directConnection=true"
     if [[ -n "$user" ]]; then
-      auth="${user}"
-      [[ -n "$pass" ]] && auth+=":${pass}"
-      auth+="@"
-      q="authSource=${authdb}"
+      local eu ep
+      eu="$(_mongo_uri_escape "$user")"
+      ep="$(_mongo_uri_escape "$pass")"
+      auth="${eu}:${ep}@"
+      q="authSource=${authdb}&directConnection=true"
     fi
     uri_q="$(printf '%q' "mongodb://${auth}127.0.0.1:${port}/?${q}")"
   fi
@@ -138,7 +266,7 @@ _mongo_auth_warn_if_needed() {
   local out="$1" check="$2"
   if echo "$out" | grep -qiE 'Authentication failed|Unauthorized|requires authentication'; then
     record_check "$check" "auth" "WARN" \
-      "auth failed — set MONGO_URI or MONGO_USER/MONGO_PASSWORD (authSource=${MONGO_AUTH_DB:-admin}); not a cluster FAIL"
+      "auth failed — check ~/.mongorc.js host.includes/db.auth or set MONGO_URI (authSource=${MONGO_AUTH_DB:-admin}); not a cluster FAIL"
     return 0
   fi
   if echo "$out" | grep -q 'MISSING_TOOL\|NO_LOCAL_BIN_AND_NO_SSH\|NO_URI'; then
@@ -253,7 +381,7 @@ print("ok="+s.ok);
   # Drop multi-line stack traces; keep first line markers
   if echo "$rs_out" | grep -qiE 'Authentication|Unauthorized|requires authentication'; then
     record_check "membership" "rs.status" "INFO" \
-      "rs.status needs auth — member health from hello only; set MONGO_URI or MONGO_USER/MONGO_PASSWORD for full status"
+      "rs.status needs auth — member health from hello only; ensure ~/.mongorc.js matches this host or set MONGO_URI"
     return
   fi
   if [[ $rs_rc -eq 0 ]] && echo "$rs_out" | grep -q '^ok=1'; then
@@ -421,7 +549,16 @@ try {
   var ol=db.getSiblingDB("local").oplog.rs;
   var first=ol.find().sort({$natural:1}).limit(1).next();
   var last=ol.find().sort({$natural:-1}).limit(1).next();
-  var hours=(last.ts.getTime()-first.ts.getTime())/1000/3600;
+  function tsSec(ts) {
+    if (ts == null) return null;
+    if (typeof ts.getHighBits === "function") return ts.getHighBits();
+    if (typeof ts.t === "number") return ts.t;
+    if (typeof ts.getTime === "function") return Math.floor(ts.getTime()/1000);
+    return null;
+  }
+  var a=tsSec(first.ts), b=tsSec(last.ts);
+  if (a == null || b == null) { print("ERR=bad oplog timestamp"); quit(0); }
+  var hours=(b-a)/3600;
   print("hours="+hours.toFixed(2));
 } catch(e) { print("ERR="+e); }
 ')" || rc=$?

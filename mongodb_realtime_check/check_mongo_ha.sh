@@ -235,6 +235,7 @@ main() {
 
   tasks_select || exit $?
   prompt_credentials
+  mongo_resolve_credentials
 
   set +e
   run_selected_tasks
