@@ -33,6 +33,15 @@ Options: `-v` verbose, `--json`, `-n` no sudo, `-o report.log`,
 ./check_mongo_ha.sh --list-tasks
 ```
 
+Query latency on the primary (`top` + `currentOp` + optional `explain`). Whole cluster, one database, or one collection:
+
+```bash
+./check_mongo_query.sh -c config/clusters/stgmongo.env -y
+./check_mongo_query.sh -c config/clusters/stgmongo.env -y --db ai_karkas_db
+./check_mongo_query.sh -c config/clusters/stgmongo.env -y --db ai_karkas_db --collection content_studio_contents
+./run_all.sh -c config/clusters/stgmongo.env -y --only query -- --db ai_karkas_db
+```
+
 Exit codes: `0` PASS · `1` WARN/SLOW · `2` FAIL.
 
 Reports: `reports/mongoaha-<slug>-<timestamp>.log`.
