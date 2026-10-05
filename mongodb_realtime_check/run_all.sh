@@ -24,6 +24,7 @@ CHILD_ARGS=()
 
 TASK_CATALOG=(
   "ha||HA cluster health check|ha,health,check_mongo_ha,mongo ha"
+  "query||Query latency (cluster / db / collection)|query,latency,check_mongo_query"
 )
 TASKS_LIST_EXAMPLES="  $(basename "$0") -c CONFIG.env -u USER -y
   $(basename "$0") -c CONFIG.env -u USER -y --only ha
@@ -38,6 +39,7 @@ MongoDB realtime check orchestrator v${SCRIPT_VERSION}
 
 Suites under this directory:
   ha       → ./check_mongo_ha.sh
+  query    → ./check_mongo_query.sh  (add -- --db NAME [--collection COLL])
 
 (More suites can be added later; deep admin runners should be named
 run_admin_suite.sh — never overload run_all to mean only admin.)
@@ -93,6 +95,14 @@ _run_suite() {
       fi
       cmd=("${ROOT}/check_mongo_ha.sh" -c "$CONFIG_FILE")
       [[ -n "$SSH_USER_OVERRIDE" ]] && cmd+=(-u "$SSH_USER_OVERRIDE")
+      [[ "$NONINTERACTIVE" == "1" ]] && cmd+=(-y)
+      cmd+=("${CHILD_ARGS[@]}")
+      ;;
+    query)
+      if ! _resolve_config; then
+        loge "query requires -c/--config"; return 2
+      fi
+      cmd=("${ROOT}/check_mongo_query.sh" -c "$CONFIG_FILE")
       [[ "$NONINTERACTIVE" == "1" ]] && cmd+=(-y)
       cmd+=("${CHILD_ARGS[@]}")
       ;;
